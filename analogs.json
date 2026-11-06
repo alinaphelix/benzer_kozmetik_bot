@@ -1,0 +1,45 @@
+{
+  "La Roche-Posay Effaclar Duo+": {
+    "inci": [
+      "AQUA",
+      "GLYCERIN",
+      "NIACINAMIDE",
+      "PROPYLENE GLYCOL",
+      "DIMETHICONE",
+      "SALICYLIC ACID",
+      "CAPRYLOYL SALICYLIC ACID"
+    ],
+    "analogs": [
+      "Bielenda Dr. Medica Anti-Imperfection",
+      "Art&Fact Salicylic Acid 2% + Niacinamide"
+    ]
+  },
+  "CeraVe Moisturizing Cream": {
+    "inci": [
+      "AQUA",
+      "GLYCERIN",
+      "CERAMIDE NP",
+      "CERAMIDE AP",
+      "CERAMIDE EOP",
+      "HYALURONIC ACID"
+    ],
+    "analogs": [
+      "Bielenda Dr. Medica Ceramide Barrier Cream",
+      "Eveline Bio Organic Extra Soft"
+    ]
+  },
+  "La Roche-Posay Cicaplast Baume B5": {
+    "inci": [
+      "AQUA",
+      "GLYCERIN",
+      "PANTHENOL",
+      "MADECASSOSIDE",
+      "SHEA BUTTER",
+      "ZINC OXIDE"
+    ],
+    "analogs": [
+      "Bielenda Dr. Medica Barrier B5",
+      "Librederm Cicacream"
+    ]
+  }
+}
