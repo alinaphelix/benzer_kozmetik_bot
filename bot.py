@@ -11,6 +11,8 @@ from typing import Optional
 import aiohttp
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from flask import Flask
 
 # ---------- НАСТРОЙКИ ----------
@@ -166,10 +168,41 @@ async def find_analogs(product_name: str, top_n: int = 5) -> list[dict]:
 # ---------- ХЕНДЛЕРЫ ----------
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
+    # --- Reply-кнопки (под полем ввода) ---
+    builder = ReplyKeyboardBuilder()
+    builder.add(KeyboardButton(text="❓ Помощь"))
+    builder.add(KeyboardButton(text="ℹ️ О боте"))
+    builder.adjust(2) # Расположить в 2 колонки
+    
+    # --- Inline-кнопка (под сообщением) ---
+    inline_builder = InlineKeyboardBuilder()
+    inline_builder.add(InlineKeyboardButton(text="🧴 Пример: CeraVe", callback_data="example_cerave"))
+    
     await message.answer(
         "Пришлите название косметического средства (крем, шампунь, тональный крем и т.п.).\n"
-        "Я найду его состав и подберу аналоги с похожими ингредиентами."
+        "Я найду его состав и подберу аналоги с похожими ингредиентами.",
+        reply_markup=builder.as_markup(resize_keyboard=True),
     )
+    await message.answer(
+        "Или нажмите на кнопку ниже, чтобы попробовать пример:",
+        reply_markup=inline_builder.as_markup()
+    )
+
+
+@dp.message(F.text == "❓ Помощь")
+async def help_handler(message: types.Message):
+    await message.answer("Просто напиши мне название косметики, и я поищу аналоги по составу.")
+
+@dp.message(F.text == "ℹ️ О боте")
+async def about_handler(message: types.Message):
+    await message.answer("Я бот, который ищет аналоги косметики по базе Open Beauty Facts.")
+
+@dp.callback_query(F.data == "example_cerave")
+async def example_handler(callback: types.CallbackQuery):
+    await callback.answer() # Убирает "часики" на кнопке
+    await callback.message.answer("🔍 Ищу состав для «CeraVe Moisturizing Cream»...")
+    # Имитация поиска для примера
+    await callback.message.answer("Это пример. Напишите название своего средства текстом, чтобы я подобрал аналоги.")
 
 
 @dp.message(F.text)
