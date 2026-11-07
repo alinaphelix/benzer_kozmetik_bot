@@ -54,31 +54,88 @@ def jaccard(a: set[str], b: set[str]) -> float:
 
 
 # ---------- OPEN BEAUTY FACTS ----------
-async def obf_search_by_name(session: aiohttp.ClientSession, name: str, limit: int = 20) -> list[dict]:
-    """Ищет продукты по названию в Open Beauty Facts."""
+# Обновленная функция поиска
+# 1. Меняем функцию поиска, чтобы она могла искать по категории
+async def obf_search_by_name(session: aiohttp.ClientSession, name: str, category: str = None, limit: int = 50) -> list[dict]:
+    """Ищет продукты. Если передана категория, ищет только в ней."""
     params = {
-        "search_terms": name,
         "page_size": limit,
         "fields": "code,product_name,brands,ingredients_text,categories",
     }
+    
+    if category:
+        # Ищем ТОЛЬКО по категории (без search_terms, чтобы фильтр сработал)
+        params["categories_tags"] = category
+    else:
+        # Если категория не определена, ищем по названию
+        params["search_terms"] = name
+        
     async with session.get(OBF_SEARCH, params=params, headers=HEADERS, timeout=15) as resp:
         if resp.status != 200:
             return []
         data = await resp.json()
     return data.get("products", []) or []
 
+# 2. Обновляем логику подбора
+async def find_analogs(product_name: str, top_n: int = 5) -> list[dict]:
+    lower_name = product_name.lower()
+    category = None
+    
+    # Определяем категорию (используем теги, которые есть в базе)
+    if any(word in lower_name for word in ["тональный", "foundation", "bb", "cc"]):
+        category = "en:foundations"  # Или "en:face-makeup"
+    elif any(word in lower_name for word in ["тушь", "mascara"]):
+        category = "en:mascaras"
+    elif any(word in lower_name for word in ["шампунь", "shampoo"]):
+        category = "en:shampoos"
+    elif any(word in lower_name for word in ["крем", "cream", "moisturizer"]):
+        category = "en:face-creams"
+    else:
+        # Если не угадали, ищем как раньше (по названию)
+        category = None
 
-async def obf_get_by_barcode(session: aiohttp.ClientSession, barcode: str) -> Optional[dict]:
-    """Получает один продукт по штрихкоду."""
-    url = OBF_PRODUCT.format(barcode=barcode)
-    async with session.get(url, headers=HEADERS, timeout=15) as resp:
-        if resp.status != 200:
-            return None
-        data = await resp.json()
-    if data.get("status") != 1:
-        return None
-    return data.get("product")
+    async with aiohttp.ClientSession() as session:
+        # Если категория определена, ищем в ней. Если нет — по названию.
+        if category:
+            candidates = await obf_search_by_name(session, product_name, category=category)
+        else:
+            candidates = await obf_search_by_name(session, product_name, category=None)
 
+        if not candidates:
+            return []
+
+        # ... (дальше ваш код сравнения Jaccard без изменений) ...
+# Обновленная функция подбора
+async def find_analogs(product_name: str, top_n: int = 5) -> list[dict]:
+    # Пытаемся угадать категорию по ключевым словам в названии
+    lower_name = product_name.lower()
+    category = None
+    
+    if "тональный" in lower_name or "foundation" in lower_name or "крем" in lower_name:
+        category = "makeup" # Или более точная категория: "foundations"
+    elif "шампунь" in lower_name or "shampoo" in lower_name:
+        category = "shampoos"
+    elif "тушь" in lower_name or "mascara" in lower_name:
+        category = "mascaras"
+        
+    async with aiohttp.ClientSession() as session:
+        candidates = await obf_search_by_name(session, product_name, category)
+        
+        # Дальше ваш код без изменений...
+        if not candidates:
+            return []
+
+        source = next((p for p in candidates if p.get("ingredients_text")), None)
+        if not source:
+            return []
+
+        source_inci = normalize_inci(source["ingredients_text"])
+        if len(source_inci) < 3:
+            return []
+
+        analogs = []
+        for p in candidates:
+            # ... остальной код сравнения (Jaccard) ...
 
 # ---------- ПОДБОР АНАЛОГОВ ----------
 async def find_analogs(product_name: str, top_n: int = 5) -> list[dict]:
