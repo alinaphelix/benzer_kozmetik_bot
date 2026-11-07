@@ -70,11 +70,63 @@ def normalize_inci(text: str) -> set[str]:
     return result
 
 
-def jaccard(a: set[str], b: set[str]) -> float:
-    """Сходство Жаккара: |A∩B| / |A∪B|."""
-    if not a or not b:
+# ---------- УМНОЕ СРАВНЕНИЕ ----------
+def smart_similarity(a_text: str, b_text: str) -> float:
+    """
+    Вычисляет взвешенное сходство двух составов.
+    Игнорирует воду/консерванты и учитывает порядок ингредиентов.
+    """
+    if not a_text or not b_text:
         return 0.0
-    return len(a & b) / len(a | b)
+        
+    # Список того, что есть почти в любом средстве (не считаем за совпадение)
+    IGNORE_LIST = {
+        "aqua", "water", "eau", "glycerin", "glycerine", "parfum", "fragrance", 
+        "phenoxyethanol", "methylparaben", "propylparaben", "ethylparaben", 
+        "butylparaben", "sodium benzoate", "potassium sorbate", "citric acid",
+        "disodium edta", "tocopherol", "alcohol", "limonene", "linalool"
+    }
+
+    def parse_weighted(text: str) -> dict:
+        clean = re.sub(r"\(.*?\)", "", text, flags=re.IGNORECASE)
+        clean = re.sub(r"(?i)(ingredients?|состав)\s*:?", "", clean)
+        parts = [p.strip().lower() for p in re.split(r"[,;\n]", clean) if p.strip()]
+        
+        result = {}
+        total_items = len(parts)
+        for i, item in enumerate(parts):
+            # Убираем проценты и цифры
+            word = re.sub(r"\s*\d+(\.\d+)?\s*%", "", item).strip()
+            if len(word) < 3 or word in IGNORE_LIST:
+                continue
+                
+            # Вес: чем ближе к началу, тем выше (от 3.0 до 1.0)
+            # Первые 5 ингредиентов получают максимальный вес
+            weight = max(1.0, 3.0 - (i / max(1, total_items)) * 2.0)
+            result[word] = weight
+        return result
+
+    dict_a = parse_weighted(a_text)
+    dict_b = parse_weighted(b_text)
+    
+    if not dict_a or not dict_b:
+        return 0.0
+
+    # Считаем сумму весов совпавших ингредиентов
+    shared_weight = 0.0
+    for word, weight in dict_a.items():
+        if word in dict_b:
+            # Берем средний вес из двух составов
+            shared_weight += (weight + dict_b[word]) / 2
+
+    # Максимально возможный вес (для нормализации)
+    max_possible_weight = sum(dict_a.values()) + sum(dict_b.values())
+    if max_possible_weight == 0:
+        return 0.0
+        
+    # Умножаем на 2, так как совпадение учитывается с двух сторон
+    score = (shared_weight * 2) / max_possible_weight
+    return min(1.0, score) # Ограничиваем максимум 100%
 
 
 # ---------- OPEN BEAUTY FACTS ----------
@@ -156,12 +208,9 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
         if not source:
             return [], None
 
-        source_inci = normalize_inci(source.get("ingredients_text", ""))
-        if len(source_inci) < 3:
-            return [], source
-
+        source_inci_text = source.get("ingredients_text", "")
+        
         # 3. Ищем аналоги для сравнения в OBF
-        # (даже если исходный продукт был из локальной базы, аналоги ищем в интернете)
         source_name = (source.get("product_name") or "").lower()
         category = "en:face-creams"
         if "foundation" in source_name or "тональный" in source_name: category = "en:foundations"
@@ -173,18 +222,26 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
         analogs = []
         for p in candidates:
             if p.get("code") == source.get("code"): continue
-            other_inci = normalize_inci(p.get("ingredients_text", ""))
-            if len(other_inci) < 3: continue
             
-            score = jaccard(source_inci, other_inci)
-            if score >= 0.15:
+            other_inci_text = p.get("ingredients_text", "")
+            if not other_inci_text: continue
+            
+            # Используем новую умную функцию
+            score = smart_similarity(source_inci_text, other_inci_text)
+            
+            # Показываем только если совпадение реально высокое (больше 30%)
+            if score >= 0.30:
+                # Считаем примерное количество общих ингредиентов для отображения
+                shared_count = len(normalize_inci(source_inci_text) & normalize_inci(other_inci_text))
+                total_count = len(normalize_inci(source_inci_text))
+                
                 analogs.append({
                     "name": p.get("product_name") or "Без названия",
                     "brand": p.get("brands") or "—",
                     "code": p.get("code"),
                     "score": round(score * 100, 1),
-                    "shared": len(source_inci & other_inci),
-                    "total": len(source_inci),
+                    "shared": shared_count,
+                    "total": total_count,
                 })
 
         analogs.sort(key=lambda x: x["score"], reverse=True)
@@ -274,7 +331,7 @@ async def handle_product(message: types.Message):
                 f"   Совпадение: <b>{a['score']}%</b> ({a['shared']} из {a['total']})\n"
                 f"   Штрихкод: <code>{a['code']}</code>\n"
             )
-        response += "\n⚠️ Сравнение по Jaccard-сходству. Это ориентир."
+        response += "\n⚠️ Сравнение по взвешенному сходству (умный алгоритм). Это ориентир."
 
     try:
         if len(response) > 4000:
