@@ -2,6 +2,7 @@
 # Python 3.10+, aiogram 3.x
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -28,6 +29,17 @@ HEADERS = {"User-Agent": "CosmeticAnalogBot/1.0 (contact: your@email)"}
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# --- ЗАГРУЗКА ЛОКАЛЬНОЙ БАЗЫ ---
+LOCAL_DB = {}
+try:
+    with open('local_brands.json', 'r', encoding='utf-8') as f:
+        LOCAL_DB = json.load(f)
+    logging.info(f"Локальная база загружена. Брендов: {len(LOCAL_DB)}")
+except FileNotFoundError:
+    logging.warning("Файл local_brands.json не найден. Бот будет искать только в OBF.")
+except json.JSONDecodeError as e:
+    logging.error(f"Ошибка в формате local_brands.json: {e}")
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = Flask(__name__)
@@ -67,23 +79,16 @@ def jaccard(a: set[str], b: set[str]) -> float:
 
 # ---------- OPEN BEAUTY FACTS ----------
 async def obf_search(session: aiohttp.ClientSession, search_terms: str = None, category: str = None, limit: int = 50) -> list[dict]:
-    """Ищет продукты. API v2 не поддерживает одновременный поиск по тексту и категории."""
-    params = {
-        "page_size": limit,
-        "fields": "code,product_name,brands,ingredients_text,categories",
-    }
-    
+    params = {"page_size": limit, "fields": "code,product_name,brands,ingredients_text,categories"}
     if category:
         params["categories_tags"] = category
     elif search_terms:
         params["search_terms"] = search_terms
     else:
         return []
-        
     try:
         async with session.get(OBF_SEARCH, params=params, headers=HEADERS, timeout=15) as resp:
             if resp.status != 200:
-                logging.warning(f"OBF API status {resp.status}")
                 return []
             data = await resp.json()
             return data.get("products", []) or []
@@ -91,17 +96,13 @@ async def obf_search(session: aiohttp.ClientSession, search_terms: str = None, c
         logging.error(f"OBF search error: {e}")
         return []
 
-
 async def obf_get_by_barcode(session: aiohttp.ClientSession, barcode: str) -> Optional[dict]:
-    """Получает продукт по штрихкоду."""
     url = OBF_PRODUCT.format(barcode=barcode)
     try:
         async with session.get(url, headers=HEADERS, timeout=15) as resp:
-            if resp.status != 200:
-                return None
+            if resp.status != 200: return None
             data = await resp.json()
-            if data.get("status") != 1:
-                return None
+            if data.get("status") != 1: return None
             return data.get("product")
     except Exception as e:
         logging.error(f"OBF barcode error: {e}")
@@ -110,86 +111,73 @@ async def obf_get_by_barcode(session: aiohttp.ClientSession, barcode: str) -> Op
 
 # ---------- ПОДБОР АНАЛОГОВ ----------
 async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -> tuple[list[dict], Optional[dict]]:
-    """
-    Возвращает кортеж: (список аналогов, исходный продукт).
-    """
+    lower_name = product_name.lower() if product_name else ""
+    source = None
+    
+    # 1. Сначала ищем в локальной базе
+    if lower_name in LOCAL_DB:
+        local_data = LOCAL_DB[lower_name]
+        source = {
+            "product_name": local_data.get("name", "Без названия"),
+            "brands": local_data.get("brand", "—"),
+            "ingredients_text": local_data.get("ingredients", ""),
+            "code": "local_db"
+        }
+        logging.info(f"Продукт найден в локальной базе: {lower_name}")
+
     async with aiohttp.ClientSession() as session:
-        source = None
-        
-        # Если передан штрихкод, ищем сразу по нему
-        if barcode:
-            source = await obf_get_by_barcode(session, barcode)
-        
-        # Если не нашли по штрихкоду или его нет, ищем по названию
+        # 2. Если в локальной базе нет, ищем в OBF
         if not source:
-            lower_name = product_name.lower() if product_name else ""
-            category = None
+            if barcode:
+                source = await obf_get_by_barcode(session, barcode)
             
-            if any(word in lower_name for word in ["тональный", "foundation", "bb", "cc"]):
-                category = "en:foundations"
-            elif any(word in lower_name for word in ["тушь", "mascara"]):
-                category = "en:mascaras"
-            elif any(word in lower_name for word in ["шампунь", "shampoo"]):
-                category = "en:shampoos"
-            elif any(word in lower_name for word in ["крем", "cream", "moisturizer"]):
-                category = "en:face-creams"
+            if not source:
+                category = None
+                if any(w in lower_name for w in ["тональный", "foundation", "bb", "cc"]): category = "en:foundations"
+                elif any(w in lower_name for w in ["тушь", "mascara"]): category = "en:mascaras"
+                elif any(w in lower_name for w in ["шампунь", "shampoo"]): category = "en:shampoos"
+                elif any(w in lower_name for w in ["крем", "cream", "moisturizer"]): category = "en:face-creams"
 
-            if category:
-                candidates = await obf_search(session, category=category, limit=100)
-            else:
-                candidates = await obf_search(session, search_terms=product_name, limit=20)
-
-            if not candidates:
-                return [], None
-
-            # Ищем исходный продукт
-            for p in candidates:
-                p_name = (p.get("product_name") or "").lower()
-                p_brand = (p.get("brands") or "").lower()
-                
-                if category:
-                    words = [w for w in lower_name.split() if len(w) > 2]
-                    if any(w in p_name or w in p_brand for w in words) and p.get("ingredients_text"):
-                        source = p
-                        break
-                else:
-                    if p.get("ingredients_text"):
-                        source = p
-                        break
+                candidates = await obf_search(session, category=category, limit=100) if category else await obf_search(session, search_terms=product_name, limit=20)
+                if candidates:
+                    for p in candidates:
+                        p_name = (p.get("product_name") or "").lower()
+                        p_brand = (p.get("brands") or "").lower()
+                        if category:
+                            words = [w for w in lower_name.split() if len(w) > 2]
+                            if any(w in p_name or w in p_brand for w in words) and p.get("ingredients_text"):
+                                source = p
+                                break
+                        else:
+                            if p.get("ingredients_text"):
+                                source = p
+                                break
 
         if not source:
             return [], None
 
         source_inci = normalize_inci(source.get("ingredients_text", ""))
         if len(source_inci) < 3:
-            return [], source # Возвращаем продукт, но без аналогов (состав слишком короткий)
+            return [], source
 
-        # Если мы искали по штрихкоду, нам нужно найти других кандидатов для сравнения
-        if barcode:
-            # Определяем категорию по названию исходного продукта для поиска аналогов
-            source_name = (source.get("product_name") or "").lower()
-            category = "en:face-creams" # По умолчанию
-            if "foundation" in source_name or "тональный" in source_name:
-                category = "en:foundations"
-            elif "mascara" in source_name or "тушь" in source_name:
-                category = "en:mascaras"
-            elif "shampoo" in source_name or "шампунь" in source_name:
-                category = "en:shampoos"
-                
-            candidates = await obf_search(session, category=category, limit=100)
-        else:
-            candidates = await obf_search(session, category=category, limit=100) if category else await obf_search(session, search_terms=product_name, limit=20)
+        # 3. Ищем аналоги для сравнения в OBF
+        # (даже если исходный продукт был из локальной базы, аналоги ищем в интернете)
+        source_name = (source.get("product_name") or "").lower()
+        category = "en:face-creams"
+        if "foundation" in source_name or "тональный" in source_name: category = "en:foundations"
+        elif "mascara" in source_name or "тушь" in source_name: category = "en:mascaras"
+        elif "shampoo" in source_name or "шампунь" in source_name: category = "en:shampoos"
+        
+        candidates = await obf_search(session, category=category, limit=100)
 
         analogs = []
         for p in candidates:
-            if p.get("code") == source.get("code"):
-                continue
+            if p.get("code") == source.get("code"): continue
             other_inci = normalize_inci(p.get("ingredients_text", ""))
-            if len(other_inci) < 3:
-                continue
+            if len(other_inci) < 3: continue
             
             score = jaccard(source_inci, other_inci)
-            if score >= 0.15:  # порог 15%
+            if score >= 0.15:
                 analogs.append({
                     "name": p.get("product_name") or "Без названия",
                     "brand": p.get("brands") or "—",
@@ -210,22 +198,16 @@ async def cmd_start(message: types.Message):
     builder.add(KeyboardButton(text="❓ Помощь"))
     builder.add(KeyboardButton(text="ℹ️ О боте"))
     builder.adjust(2)
-    
     inline_builder = InlineKeyboardBuilder()
     inline_builder.add(InlineKeyboardButton(text="🧴 Пример: CeraVe", callback_data="example_cerave"))
     
     await message.answer(
-        "Пришлите название косметического средства (крем, шампунь, тональный крем и т.п.) "
-        "или его <b>штрихкод</b> (8-14 цифр).\n"
+        "Пришлите название косметического средства или его <b>штрихкод</b> (8-14 цифр).\n"
         "Я найду его состав и подберу аналоги с похожими ингредиентами.",
         reply_markup=builder.as_markup(resize_keyboard=True),
         parse_mode="HTML"
     )
-    await message.answer(
-        "Или нажмите на кнопку ниже, чтобы попробовать пример:",
-        reply_markup=inline_builder.as_markup()
-    )
-
+    await message.answer("Или нажмите на кнопку ниже, чтобы попробовать пример:", reply_markup=inline_builder.as_markup())
 
 @dp.message(F.text == "❓ Помощь")
 async def help_handler(message: types.Message):
@@ -233,7 +215,7 @@ async def help_handler(message: types.Message):
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about_handler(message: types.Message):
-    await message.answer("Я бот, который ищет аналоги косметики по базе Open Beauty Facts.")
+    await message.answer("Я бот, который ищет аналоги косметики по базе Open Beauty Facts и локальной базе.")
 
 @dp.callback_query(F.data == "example_cerave")
 async def example_handler(callback: types.CallbackQuery):
@@ -245,9 +227,8 @@ async def example_handler(callback: types.CallbackQuery):
 @dp.message(F.text)
 async def handle_product(message: types.Message):
     text = message.text.strip()
-    
-    # Проверяем, не штрихкод ли это (только цифры, длина 8-14)
     barcode = None
+    
     if text.isdigit() and 8 <= len(text) <= 14:
         barcode = text
         name = "продукт"
@@ -268,59 +249,48 @@ async def handle_product(message: types.Message):
 
     if not source:
         await message.answer(
-            "❌ Не удалось найти продукт в открытой базе Open Beauty Facts.\n\n"
-            "Попробуйте указать бренд + название (например, «CeraVe Moisturizing Cream») или проверьте штрихкод."
+            "❌ Не удалось найти продукт в базе Open Beauty Facts и в локальной базе.\n\n"
+            "Попробуйте указать бренд + название или проверьте штрихкод."
         )
         return
 
-    # Формируем информацию об исходном продукте
     source_name = source.get("product_name") or "Без названия"
     source_brand = source.get("brands") or "—"
     source_inci_text = source.get("ingredients_text") or "Состав не указан"
     
-    # Ограничиваем длину состава, чтобы не превысить лимит сообщения Telegram (4096 символов)
     if len(source_inci_text) > 1000:
         source_inci_text = source_inci_text[:1000] + "..."
 
-    response = f"🧴 <b>Найден продукт:</b>\n"
-    response += f"<b>{source_name}</b> ({source_brand})\n"
+    response = f"🧴 <b>Найден продукт:</b>\n<b>{source_name}</b> ({source_brand})\n"
     response += f"📜 <b>Состав:</b>\n<i>{source_inci_text}</i>\n\n"
 
     if not analogs:
-        response += (
-            "❌ Аналоги не найдены. Возможные причины:\n"
-            "• в базе нет других средств с похожим составом;\n"
-            "• состав продукта слишком короткий для сравнения."
-        )
+        response += "❌ Аналоги не найдены. Возможно, в базе нет средств с похожим составом."
     else:
         response += "🧪 <b>Аналоги по составу:</b>\n"
         for i, a in enumerate(analogs, 1):
             response += (
                 f"{i}. <b>{a['name']}</b> ({a['brand']})\n"
-                f"   Совпадение: <b>{a['score']}%</b> "
-                f"({a['shared']} из {a['total']} ингредиентов)\n"
+                f"   Совпадение: <b>{a['score']}%</b> ({a['shared']} из {a['total']})\n"
                 f"   Штрихкод: <code>{a['code']}</code>\n"
             )
-        response += "\n⚠️ Сравнение по Jaccard-сходству. Это ориентир, а не гарантия идентичности формулы."
+        response += "\n⚠️ Сравнение по Jaccard-сходству. Это ориентир."
 
-    # Отправляем ответ с защитой от ошибок
     try:
-        # Разбиваем сообщение, если оно слишком длинное
         if len(response) > 4000:
             for x in range(0, len(response), 4000):
                 await message.answer(response[x:x+4000], parse_mode="HTML")
         else:
             await message.answer(response, parse_mode="HTML")
     except Exception as e:
-        logging.error(f"Ошибка при отправке ответа: {e}")
-        await message.answer("Произошла ошибка при формировании ответа. Попробуйте другое название.")
+        logging.error(f"Ошибка при отправке: {e}")
+        await message.answer("Произошла ошибка при формировании ответа.")
 
 
 # ---------- ЗАПУСК ----------
 async def main():
     threading.Thread(target=run_flask, daemon=True).start()
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
