@@ -20,7 +20,6 @@ if not BOT_TOKEN:
 
 # Open Beauty Facts API
 OBF_SEARCH = "https://world.openbeautyfacts.org/api/v2/search"
-OBF_PRODUCT = "https://world.openbeautyfacts.org/api/v2/product/{barcode}.json"
 HEADERS = {"User-Agent": "CosmeticAnalogBot/1.0 (contact: your@email)"}
 
 logging.basicConfig(level=logging.INFO)
@@ -75,10 +74,8 @@ async def obf_search(session: aiohttp.ClientSession, search_terms: str = None, c
     }
     
     if category:
-        # Ищем ТОЛЬКО по категории
         params["categories_tags"] = category
     elif search_terms:
-        # Ищем ТОЛЬКО по названию
         params["search_terms"] = search_terms
     else:
         return []
@@ -111,7 +108,6 @@ async def find_analogs(product_name: str, top_n: int = 5) -> list[dict]:
         category = "en:face-creams"
     
     async with aiohttp.ClientSession() as session:
-        # Если знаем категорию — ищем в ней, иначе — по названию
         if category:
             candidates = await obf_search(session, category=category, limit=100)
         else:
@@ -120,28 +116,23 @@ async def find_analogs(product_name: str, top_n: int = 5) -> list[dict]:
         if not candidates:
             return []
 
-        # Ищем исходный продукт (первый, у которого есть состав и название похоже на запрос)
         source = None
         for p in candidates:
             p_name = (p.get("product_name") or "").lower()
             p_brand = (p.get("brands") or "").lower()
             
-            # Если искали по категории, проверяем, что в названии/бренде есть слова из запроса
+            # Проверяем, что в названии или бренде есть слова из запроса
             if category:
                 words = [w for w in lower_name.split() if len(w) > 2]
                 if any(w in p_name or w in p_brand for w in words) and p.get("ingredients_text"):
                     source = p
                     break
             else:
-                # Если искали по названию, берем первый с составом
                 if p.get("ingredients_text"):
                     source = p
                     break
         
-        # Если не нашли исходный продукт по словам, берем первый попавшийся с составом
-        if not source:
-            source = next((p for p in candidates if p.get("ingredients_text")), None)
-
+        # Если не нашли исходный продукт, возвращаем пустой список (НЕ берем шампунь!)
         if not source:
             return []
 
@@ -158,7 +149,7 @@ async def find_analogs(product_name: str, top_n: int = 5) -> list[dict]:
                 continue
             
             score = jaccard(source_inci, other_inci)
-            if score >= 0.15:  # порог: хотя бы 15% общих ингредиентов
+            if score >= 0.15:
                 analogs.append({
                     "name": p.get("product_name") or "Без названия",
                     "brand": p.get("brands") or "—",
@@ -222,9 +213,7 @@ async def handle_product(message: types.Message):
 
 # ---------- ЗАПУСК ----------
 async def main():
-    # Запускаем Flask в отдельном потоке для Render
     threading.Thread(target=run_flask, daemon=True).start()
-    # Запускаем бота
     await dp.start_polling(bot)
 
 
