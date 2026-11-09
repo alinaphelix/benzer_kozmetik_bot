@@ -106,44 +106,40 @@ def smart_similarity(a_text: str, b_text: str) -> float:
     return min(1.0, score)
 
 
-# ---------- ПОИСК В ИНТЕРНЕТЕ (СТРОГАЯ ПРОВЕРКА) ----------
+# ---------- ПОИСК В ИНТЕРНЕТЕ ----------
 def search_web_for_ingredients(product_name: str) -> Optional[str]:
-    """Ищет состав и проверяет, что на странице есть ВСЕ слова из запроса."""
     words = [w.lower() for w in product_name.split() if len(w) > 2]
-    
-    # 1. Пробуем Google
     query = f"{product_name} состав ингредиенты INCI"
+    
+    # Определяем, что мы ищем, чтобы отсеять мусор
+    is_mascara = any(w in product_name.lower() for w in ["тушь", "mascara", "ресниц"])
+    is_shampoo = any(w in product_name.lower() for w in ["шампунь", "shampoo"])
+    
     try:
         urls = list(search(query, num_results=5, lang="ru", sleep_interval=1))
     except Exception as e:
         logging.warning(f"Google search failed: {e}")
-        urls = []
-
-    # 2. Если Google не дал ссылок, пробуем DuckDuckGo
-    if not urls:
-        try:
-            ddg_url = "https://html.duckduckgo.com/html/"
-            resp = requests.post(ddg_url, data={'q': query}, headers=HEADERS, timeout=10)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            links = soup.find_all('a', class_='result__a')
-            urls = [link['href'] for link in links if link.get('href')][:5]
-        except Exception as e:
-            logging.error(f"DuckDuckGo search failed: {e}")
+        return None
 
     for url in urls:
         try:
-            if 'duckduckgo.com/l/?uddg=' in url:
-                url = requests.utils.unquote(url.split('uddg=')[1].split('&')[0])
-
             response = requests.get(url, headers=HEADERS, timeout=10)
             if response.status_code != 200: continue
             
             soup = BeautifulSoup(response.text, 'html.parser')
             page_text = soup.get_text(separator=' ', strip=True).lower()
             
-            # СТРОГАЯ ПРОВЕРКА: на странице должны быть ВСЕ слова из названия
+            # Проверяем, что на странице есть ВСЕ слова из запроса
             if not all(w in page_text for w in words):
-                logging.info(f"Пропускаем {url}: нет всех слов из запроса")
+                continue
+
+            # ЖЕСТКИЙ ФИЛЬТР: если ищем тушь, на странице должно быть слово "тушь" или "mascara"
+            if is_mascara and not any(w in page_text for w in ["тушь", "mascara", "ресниц"]):
+                logging.info(f"Пропускаем {url}: нет упоминания туши")
+                continue
+                
+            if is_shampoo and not any(w in page_text for w in ["шампунь", "shampoo", "волос"]):
+                logging.info(f"Пропускаем {url}: нет упоминания шампуня")
                 continue
 
             # Ищем блок с составом
@@ -188,8 +184,15 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
     lower_name = product_name.lower() if product_name else ""
     source = None
     source_inci_text = ""
+    category = None
     
-    # 1. Локальная база
+    # 1. Определяем категорию
+    if any(w in lower_name for w in ["тональный", "foundation", "bb", "cc"]): category = "en:foundations"
+    elif any(w in lower_name for w in ["тушь", "mascara"]): category = "en:mascaras"
+    elif any(w in lower_name for w in ["шампунь", "shampoo"]): category = "en:shampoos"
+    elif any(w in lower_name for w in ["крем", "cream", "moisturizer"]): category = "en:face-creams"
+    
+    # 2. Локальная база
     if LOCAL_DB:
         words = [w for w in lower_name.split() if len(w) > 2]
         for key, local_data in LOCAL_DB.items():
@@ -203,17 +206,11 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
                 source_inci_text = source["ingredients_text"]
                 break
 
-    # 2. Open Beauty Facts
+    # 3. Open Beauty Facts
     if not source:
         async with aiohttp.ClientSession() as session:
             if barcode: source = await obf_get_by_barcode(session, barcode)
             if not source:
-                category = None
-                if any(w in lower_name for w in ["тональный", "foundation", "bb", "cc"]): category = "en:foundations"
-                elif any(w in lower_name for w in ["тушь", "mascara"]): category = "en:mascaras"
-                elif any(w in lower_name for w in ["шампунь", "shampoo"]): category = "en:shampoos"
-                elif any(w in lower_name for w in ["крем", "cream", "moisturizer"]): category = "en:face-creams"
-
                 candidates = await obf_search(session, category=category, limit=100) if category else await obf_search(session, search_terms=product_name, limit=20)
                 if candidates:
                     for p in candidates:
@@ -229,7 +226,7 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
                                 source = p
                                 break
 
-    # 3. Поиск в интернете
+    # 4. Поиск в интернете
     if not source:
         logging.info(f"Поиск в интернете для: {product_name}")
         found_ingredients = search_web_for_ingredients(product_name)
@@ -246,14 +243,9 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
     if not source_inci_text: source_inci_text = source.get("ingredients_text", "")
     if not source_inci_text or len(source_inci_text) < 20: return [], source
 
-    # 4. Поиск аналогов
+    # 5. Поиск аналогов
     async with aiohttp.ClientSession() as session:
-        source_name = (source.get("product_name") or "").lower()
-        category = "en:face-creams"
-        if "foundation" in source_name or "тональный" in source_name: category = "en:foundations"
-        elif "mascara" in source_name or "тушь" in source_name: category = "en:mascaras"
-        elif "shampoo" in source_name or "шампунь" in source_name: category = "en:shampoos"
-        
+        if not category: category = "en:face-creams" # По умолчанию
         candidates = await obf_search(session, category=category, limit=100)
 
         analogs = []
