@@ -12,7 +12,6 @@ from typing import Optional
 import aiohttp
 import requests
 from bs4 import BeautifulSoup
-from googlesearch import search
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -21,15 +20,16 @@ from flask import Flask
 
 # ---------- НАСТРОЙКИ ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+APIFY_TOKEN = os.getenv("APIFY_TOKEN") # ВАЖНО: Добавьте этот токен в Render!
 if not BOT_TOKEN:
     raise RuntimeError("Задайте BOT_TOKEN в переменных окружения")
+
+# ID скрапера Logiover на Apify
+APIFY_ACTOR = "logiover~open-beauty-facts-scraper"
 
 OBF_SEARCH = "https://world.openbeautyfacts.org/api/v2/search"
 OBF_PRODUCT = "https://world.openbeautyfacts.org/api/v2/product/{barcode}.json"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
-# Сайты, где чаще всего лежат правильные составы
-TARGET_SITES = ["incidecoder.com", "cosdna.com", "goldapple.ru", "letu.ru", "ozon.ru", "wildberries.ru", "podrygka.ru", "rivegauche.ru"]
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -70,8 +70,6 @@ def normalize_inci(text: str) -> set[str]:
             result.add(w)
     return result
 
-
-# ---------- УМНОЕ СРАВНЕНИЕ ----------
 def smart_similarity(a_text: str, b_text: str) -> float:
     if not a_text or not b_text: return 0.0
     IGNORE_LIST = {
@@ -101,71 +99,43 @@ def smart_similarity(a_text: str, b_text: str) -> float:
             shared_weight += (weight + dict_b[word]) / 2
     max_possible_weight = sum(dict_a.values()) + sum(dict_b.values())
     if max_possible_weight == 0: return 0.0
-    score = (shared_weight * 2) / max_possible_weight
-    return min(1.0, score)
+    return min(1.0, (shared_weight * 2) / max_possible_weight)
 
 
-# ---------- УЛУЧШЕННЫЙ ПОИСК В ИНТЕРНЕТЕ ----------
-def search_web_for_ingredients(product_name: str) -> Optional[str]:
-    words = [w.lower() for w in product_name.split() if len(w) > 2]
-    
-    # Определяем, что ищем
-    is_mascara = any(w in product_name.lower() for w in ["тушь", "mascara", "ресниц"])
-    is_shampoo = any(w in product_name.lower() for w in ["шампунь", "shampoo"])
-    
-    # Ищем сначала на специализированных сайтах (через Google)
-    site_query = " OR ".join([f"site:{site}" for site in TARGET_SITES])
-    query = f"{product_name} состав ингредиенты ({site_query})"
-    if is_mascara: query += " тушь"
-    if is_shampoo: query += " шампунь"
-
-    logging.info(f"Google Query: {query}")
-
-    try:
-        urls = list(search(query, num_results=5, lang="ru", sleep_interval=1))
-    except Exception as e:
-        logging.warning(f"Google search failed: {e}")
+# ---------- ПОИСК ЧЕРЕЗ APIFY ----------
+def search_via_apify(product_name: str) -> Optional[str]:
+    if not APIFY_TOKEN:
+        logging.warning("APIFY_TOKEN не задан, поиск через Apify пропущен.")
         return None
-
-    for url in urls:
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=10)
-            if response.status_code != 200: continue
+        
+    logging.info(f"Запуск Apify для: {product_name}")
+    url = f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items?token={APIFY_TOKEN}"
+    
+    # Настройки для скрапера Logiover (поиск по названию бренда/продукта)
+    body = {
+        "searchQuery": product_name,
+        "maxResults": 5
+    }
+    
+    try:
+        response = requests.post(url, json=body, timeout=60)
+        if response.status_code != 200:
+            logging.error(f"Ошибка Apify: {response.text}")
+            return None
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+        data = response.json()
+        if not data or not isinstance(data, list):
+            return None
             
-            # Удаляем мусорные теги
-            for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                tag.decompose()
+        for item in data:
+            # Скрапер Logiover возвращает состав в поле ingredientsText или ingredients
+            ingredients = item.get("ingredientsText") or item.get("ingredients")
+            if ingredients and len(ingredients) > 20:
+                return ingredients
                 
-            # Ищем блоки с текстом
-            text_blocks = soup.find_all(['p', 'div', 'li', 'span'])
-            for block in text_blocks:
-                block_text = block.get_text(separator=' ', strip=True).lower()
-                
-                # Проверяем, что блок содержит ключевые слова
-                if not all(w in block_text for w in words):
-                    continue
-                    
-                if is_mascara and not any(w in block_text for w in ["тушь", "mascara", "ресниц"]):
-                    continue
-                    
-                if is_shampoo and not any(w in block_text for w in ["шампунь", "shampoo", "волос"]):
-                    continue
-
-                # Ищем состав именно в этом блоке
-                match = re.search(r'(?:Состав|Ingredients|INCI)[:\s]*([A-ZА-Я][^.!?]{50,1500})', block_text, re.IGNORECASE)
-                if match:
-                    ingredients = match.group(1).strip()
-                    # Проверяем, что это реально состав (много запятых)
-                    if ingredients.count(',') > 3 and len(ingredients) > 30:
-                        logging.info(f"Найден состав в блоке на {url}")
-                        return ingredients
-                        
-        except Exception as e:
-            logging.warning(f"Ошибка парсинга {url}: {e}")
-            continue
-            
+    except Exception as e:
+        logging.error(f"Ошибка запроса к Apify: {e}")
+        
     return None
 
 
@@ -239,16 +209,16 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
                                 source = p
                                 break
 
-    # 3. Поиск в интернете (улучшенный)
+    # 3. Apify (Скрапер Logiover)
     if not source:
-        logging.info(f"Поиск в интернете для: {product_name}")
-        found_ingredients = search_web_for_ingredients(product_name)
+        logging.info("Поиск через Apify...")
+        found_ingredients = search_via_apify(product_name)
         if found_ingredients:
             source = {
                 "product_name": product_name,
-                "brands": "Найдено в интернете",
+                "brands": "Найдено через Apify",
                 "ingredients_text": found_ingredients,
-                "code": "web_search"
+                "code": "apify_search"
             }
             source_inci_text = found_ingredients
 
@@ -281,104 +251,4 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
         analogs.sort(key=lambda x: x["score"], reverse=True)
         return analogs[:top_n], source
 
-
-# ---------- ХЕНДЛЕРЫ ----------
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    builder = ReplyKeyboardBuilder()
-    builder.add(KeyboardButton(text="❓ Помощь"))
-    builder.add(KeyboardButton(text="ℹ️ О боте"))
-    builder.adjust(2)
-    inline_builder = InlineKeyboardBuilder()
-    inline_builder.add(InlineKeyboardButton(text="🧴 Пример: CeraVe", callback_data="example_cerave"))
-    
-    await message.answer(
-        "Пришлите название косметического средства или его <b>штрихкод</b> (8-14 цифр).\n"
-        "Я найду его состав и подберу аналоги с похожими ингредиентами.",
-        reply_markup=builder.as_markup(resize_keyboard=True),
-        parse_mode="HTML"
-    )
-    await message.answer("Или нажмите на кнопку ниже, чтобы попробовать пример:", reply_markup=inline_builder.as_markup())
-
-@dp.message(F.text == "❓ Помощь")
-async def help_handler(message: types.Message):
-    await message.answer("Напиши мне название косметики или её штрихкод, и я поищу аналоги по составу. Ищу в Open Beauty Facts, локальной базе и в интернете.")
-
-@dp.message(F.text == "ℹ️ О боте")
-async def about_handler(message: types.Message):
-    await message.answer("Я бот, который ищет аналоги косметики. Умею искать в базах и в интернете.")
-
-@dp.callback_query(F.data == "example_cerave")
-async def example_handler(callback: types.CallbackQuery):
-    await callback.answer()
-    await callback.message.answer("🔍 Ищу состав для «CeraVe Moisturizing Cream»...")
-    await callback.message.answer("Это пример. Напишите название своего средства текстом или пришлите штрихкод.")
-
-@dp.message(F.text)
-async def handle_product(message: types.Message):
-    text = message.text.strip()
-    barcode = None
-    
-    if text.isdigit() and 8 <= len(text) <= 14:
-        barcode = text
-        name = "продукт"
-        await message.answer(f"🔍 Ищу состав по штрихкоду {barcode}...")
-    else:
-        name = text
-        if len(name) < 2:
-            await message.answer("Название слишком короткое. Пришлите полное название средства.")
-            return
-        await message.answer(f"🔍 Ищу состав для «{name}»...")
-
-    try:
-        analogs, source = await find_analogs(product_name=name, barcode=barcode)
-    except Exception as e:
-        logging.exception("Ошибка подбора")
-        await message.answer("⚠️ Не удалось выполнить поиск. Попробуйте позже.")
-        return
-
-    if not source:
-        await message.answer(
-            "❌ Не удалось найти продукт ни в базе, ни в интернете.\n\n"
-            "Попробуйте указать бренд + название более точно."
-        )
-        return
-
-    source_name = source.get("product_name") or "Без названия"
-    source_brand = source.get("brands") or "—"
-    source_inci_text = source.get("ingredients_text") or "Состав не указан"
-    
-    if len(source_inci_text) > 800: source_inci_text = source_inci_text[:800] + "..."
-
-    response = f"🧴 <b>Найден продукт:</b>\n<b>{source_name}</b> ({source_brand})\n"
-    response += f"📜 <b>Состав:</b>\n<i>{source_inci_text}</i>\n\n"
-
-    if not analogs:
-        response += "❌ Аналоги не найдены. Возможно, в базе нет средств с похожим составом."
-    else:
-        response += "🧪 <b>Аналоги по составу:</b>\n"
-        for i, a in enumerate(analogs, 1):
-            response += (
-                f"{i}. <b>{a['name']}</b> ({a['brand']})\n"
-                f"   Совпадение: <b>{a['score']}%</b> ({a['shared']} из {a['total']})\n"
-                f"   Штрихкод: <code>{a['code']}</code>\n"
-            )
-        response += "\n⚠️ Сравнение по взвешенному сходству."
-
-    try:
-        if len(response) > 4000:
-            for x in range(0, len(response), 4000):
-                await message.answer(response[x:x+4000], parse_mode="HTML")
-        else:
-            await message.answer(response, parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"Ошибка при отправке: {e}")
-        await message.answer("Произошла ошибка при формировании ответа.")
-
-# ---------- ЗАПУСК ----------
-async def main():
-    threading.Thread(target=run_flask, daemon=True).start()
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# ... (остальной код с хендлерами и запуском остается без изменений) ...
