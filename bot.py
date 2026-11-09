@@ -28,6 +28,9 @@ OBF_SEARCH = "https://world.openbeautyfacts.org/api/v2/search"
 OBF_PRODUCT = "https://world.openbeautyfacts.org/api/v2/product/{barcode}.json"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
+# Сайты, где чаще всего лежат правильные составы
+TARGET_SITES = ["incidecoder.com", "cosdna.com", "goldapple.ru", "letu.ru", "ozon.ru", "wildberries.ru", "podrygka.ru", "rivegauche.ru"]
+
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -67,10 +70,6 @@ def normalize_inci(text: str) -> set[str]:
             result.add(w)
     return result
 
-def jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b: return 0.0
-    return len(a & b) / len(a | b)
-
 
 # ---------- УМНОЕ СРАВНЕНИЕ ----------
 def smart_similarity(a_text: str, b_text: str) -> float:
@@ -106,15 +105,22 @@ def smart_similarity(a_text: str, b_text: str) -> float:
     return min(1.0, score)
 
 
-# ---------- ПОИСК В ИНТЕРНЕТЕ ----------
+# ---------- УЛУЧШЕННЫЙ ПОИСК В ИНТЕРНЕТЕ ----------
 def search_web_for_ingredients(product_name: str) -> Optional[str]:
     words = [w.lower() for w in product_name.split() if len(w) > 2]
-    query = f"{product_name} состав ингредиенты INCI"
     
-    # Определяем, что мы ищем, чтобы отсеять мусор
+    # Определяем, что ищем
     is_mascara = any(w in product_name.lower() for w in ["тушь", "mascara", "ресниц"])
     is_shampoo = any(w in product_name.lower() for w in ["шампунь", "shampoo"])
     
+    # Ищем сначала на специализированных сайтах (через Google)
+    site_query = " OR ".join([f"site:{site}" for site in TARGET_SITES])
+    query = f"{product_name} состав ингредиенты ({site_query})"
+    if is_mascara: query += " тушь"
+    if is_shampoo: query += " шампунь"
+
+    logging.info(f"Google Query: {query}")
+
     try:
         urls = list(search(query, num_results=5, lang="ru", sleep_interval=1))
     except Exception as e:
@@ -127,31 +133,39 @@ def search_web_for_ingredients(product_name: str) -> Optional[str]:
             if response.status_code != 200: continue
             
             soup = BeautifulSoup(response.text, 'html.parser')
-            page_text = soup.get_text(separator=' ', strip=True).lower()
             
-            # Проверяем, что на странице есть ВСЕ слова из запроса
-            if not all(w in page_text for w in words):
-                continue
-
-            # ЖЕСТКИЙ ФИЛЬТР: если ищем тушь, на странице должно быть слово "тушь" или "mascara"
-            if is_mascara and not any(w in page_text for w in ["тушь", "mascara", "ресниц"]):
-                logging.info(f"Пропускаем {url}: нет упоминания туши")
-                continue
+            # Удаляем мусорные теги
+            for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                tag.decompose()
                 
-            if is_shampoo and not any(w in page_text for w in ["шампунь", "shampoo", "волос"]):
-                logging.info(f"Пропускаем {url}: нет упоминания шампуня")
-                continue
+            # Ищем блоки с текстом
+            text_blocks = soup.find_all(['p', 'div', 'li', 'span'])
+            for block in text_blocks:
+                block_text = block.get_text(separator=' ', strip=True).lower()
+                
+                # Проверяем, что блок содержит ключевые слова
+                if not all(w in block_text for w in words):
+                    continue
+                    
+                if is_mascara and not any(w in block_text for w in ["тушь", "mascara", "ресниц"]):
+                    continue
+                    
+                if is_shampoo and not any(w in block_text for w in ["шампунь", "shampoo", "волос"]):
+                    continue
 
-            # Ищем блок с составом
-            match = re.search(r'(?:Состав|Ingredients|INCI)[:\s]*([A-ZА-Я][^\n]{50,1500})', page_text, re.IGNORECASE)
-            if match:
-                ingredients = match.group(1).strip()
-                if ingredients.count(',') > 3:
-                    logging.info(f"Найден состав на {url}")
-                    return ingredients
+                # Ищем состав именно в этом блоке
+                match = re.search(r'(?:Состав|Ingredients|INCI)[:\s]*([A-ZА-Я][^.!?]{50,1500})', block_text, re.IGNORECASE)
+                if match:
+                    ingredients = match.group(1).strip()
+                    # Проверяем, что это реально состав (много запятых)
+                    if ingredients.count(',') > 3 and len(ingredients) > 30:
+                        logging.info(f"Найден состав в блоке на {url}")
+                        return ingredients
+                        
         except Exception as e:
             logging.warning(f"Ошибка парсинга {url}: {e}")
             continue
+            
     return None
 
 
@@ -186,13 +200,12 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
     source_inci_text = ""
     category = None
     
-    # 1. Определяем категорию
     if any(w in lower_name for w in ["тональный", "foundation", "bb", "cc"]): category = "en:foundations"
     elif any(w in lower_name for w in ["тушь", "mascara"]): category = "en:mascaras"
     elif any(w in lower_name for w in ["шампунь", "shampoo"]): category = "en:shampoos"
     elif any(w in lower_name for w in ["крем", "cream", "moisturizer"]): category = "en:face-creams"
-    
-    # 2. Локальная база
+
+    # 1. Локальная база
     if LOCAL_DB:
         words = [w for w in lower_name.split() if len(w) > 2]
         for key, local_data in LOCAL_DB.items():
@@ -206,7 +219,7 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
                 source_inci_text = source["ingredients_text"]
                 break
 
-    # 3. Open Beauty Facts
+    # 2. Open Beauty Facts
     if not source:
         async with aiohttp.ClientSession() as session:
             if barcode: source = await obf_get_by_barcode(session, barcode)
@@ -226,7 +239,7 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
                                 source = p
                                 break
 
-    # 4. Поиск в интернете
+    # 3. Поиск в интернете (улучшенный)
     if not source:
         logging.info(f"Поиск в интернете для: {product_name}")
         found_ingredients = search_web_for_ingredients(product_name)
@@ -243,11 +256,10 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
     if not source_inci_text: source_inci_text = source.get("ingredients_text", "")
     if not source_inci_text or len(source_inci_text) < 20: return [], source
 
-    # 5. Поиск аналогов
+    # 4. Поиск аналогов
     async with aiohttp.ClientSession() as session:
-        if not category: category = "en:face-creams" # По умолчанию
+        if not category: category = "en:face-creams"
         candidates = await obf_search(session, category=category, limit=100)
-
         analogs = []
         for p in candidates:
             if p.get("code") == source.get("code"): continue
@@ -266,7 +278,6 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
                     "shared": shared_count,
                     "total": total_count,
                 })
-
         analogs.sort(key=lambda x: x["score"], reverse=True)
         return analogs[:top_n], source
 
@@ -291,18 +302,17 @@ async def cmd_start(message: types.Message):
 
 @dp.message(F.text == "❓ Помощь")
 async def help_handler(message: types.Message):
-    await message.answer("Напиши мне название косметики или её штрихкод, и я поищу аналоги по составу.")
+    await message.answer("Напиши мне название косметики или её штрихкод, и я поищу аналоги по составу. Ищу в Open Beauty Facts, локальной базе и в интернете.")
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about_handler(message: types.Message):
-    await message.answer("Я бот, который ищет аналоги косметики. Ищу в Open Beauty Facts, локальной базе и в интернете.")
+    await message.answer("Я бот, который ищет аналоги косметики. Умею искать в базах и в интернете.")
 
 @dp.callback_query(F.data == "example_cerave")
 async def example_handler(callback: types.CallbackQuery):
     await callback.answer()
     await callback.message.answer("🔍 Ищу состав для «CeraVe Moisturizing Cream»...")
     await callback.message.answer("Это пример. Напишите название своего средства текстом или пришлите штрихкод.")
-
 
 @dp.message(F.text)
 async def handle_product(message: types.Message):
@@ -364,7 +374,6 @@ async def handle_product(message: types.Message):
     except Exception as e:
         logging.error(f"Ошибка при отправке: {e}")
         await message.answer("Произошла ошибка при формировании ответа.")
-
 
 # ---------- ЗАПУСК ----------
 async def main():
