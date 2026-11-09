@@ -1,12 +1,32 @@
 {
-  "belor design party": {
-    "brand": "Belor Design",
-    "name": "Party",
-    "ingredients": "Aqua, Propylene Glycol, Methyl Methacrylate Crosspolymer, Trilaureth-4 Phosphate, Hydrogenated Polydecene, Phenyl Trimethicone, Isopropyl Palmitate, Ethylhexyl Palmitate, Dimethicone/ Vinyl Dimethicone Crosspolymer, Ammonium Acryloyldimethyltaurate / VP Copolymer, Aloe Barbadensis Leaf Juice, Potassium Sorbate, Sodium Benzoate, Aluminum Starch Octenylsuccinate, Lauroyl Lysine, Silica, Glyceryl Stearate, Cetearyl Alcohol, Phenoxyethanol, Ethylparaben, Butylparaben, Methylparaben, Propylparaben, Parfum, (+/- CI 77019, CI 77491, CI 77492, CI 77499, CI 77891)."
+  "wisepicks lulu": {
+    "brand": "Lulu",
+    "name": "Wisepicks",
+    "ingredients": "Made from 100% virgin pulp, Hypoallergenic, Whitened without chlorine bleach, Super absorbent, Ultra soft",
+    "barcode": "6294011679513"
   },
-  "natura siberica": {
-    "brand": "Natura Siberica",
-    "name": "Крем для лица",
-    "ingredients": "Aqua, Glycerin, ..."
+  "makeup removing cleansing oil weleda": {
+    "brand": "Weleda",
+    "name": "Makeup Removing Cleansing Oil",
+    "ingredients": "Helianthus Annuus (Sunflower) Seed Oil Sunflower Seed Oil Polyglyceryl-4 Oleate Ricinus Communis (Castor) Seed Oil Castor Oil Polyglyceryl-10 Laurate Prunus Armeniaca (Apricot) Kernel Oil Apricot Kernel Oil Hamamelis Virginiana (Witch Hazel) Water Witch Hazel Distillate Tocopherol Alcohol Water (Aqua)",
+    "barcode": "4001638589581"
+  },
+  "trublend skin enhancer covergirl": {
+    "brand": "COVERGIRL",
+    "name": "Trublend Skin Enhancer",
+    "ingredients": "Mica, Synthetic Fluorphlogopite, Boron Nitride, Dimethicone, Magnesium Aluminum Silicate, Octyldodecyl Stearoyl Stearate, Silica, Isopropyl Palmitate, Cetearyl Ethylhexanoate, Polysorbate 20, Ethylhexylglycerin, Lauroyl Lysine, 1,2-Hexanediol, Caprylic/Capric Triglyceride, Tin Oxide, Acrylamide/Sodium Acryloyldimethyltaurate Copolymer, Glycol Stearate, Glyceryl Caprylate, Caprylyl Glycol, Sodium Hyaluronate, Isohexadecane, Polysorbate 80, Sorbitan Oleate, Rosa Alba Flower Extract, Tocopherol, Phenoxyethanol, May Contain/Peut Contenir (+/-): Titanium Dioxide (CI 77891), Iron Oxides (CI 77491, CI 77492, CI 77499), Red 7 (CI 15850), Red 27 (CI 45410)",
+    "barcode": "3616307174930"
+  },
+  "scented baby wipes mama": {
+    "brand": "Mama",
+    "name": "Scented Baby Wipes",
+    "ingredients": "Aqua, Propylene Glycol, Phenoxyethanol, PEG-40 Hydrogenated Castor Oil, Aloe Barbadensis Leaf Juice, Parfum, Chamomilla Recutita Flower Extract, Punica Granatum Fruit Extract, Citric Acid, Sodium Citrate, Benzoic Acid, Dehydroacetic Acid",
+    "barcode": "4088700355183"
+  },
+  "face wash fair menz": {
+    "brand": "Fair Menz",
+    "name": "Face Wash",
+    "ingredients": "Glycerine, Stearic, Palmitic, Myristic, Lauric Acid, Ethylene Glycol Di-Stearate, Kaolin, Thermus Thermophillus Ferment (&) Glycerine, Alkyl Glucoside, Glyceryl Monostearate, Polyquaternium 7, Niacinamide, Sodium Ascorbyl Phosphate, Vitamin B-6, Tocopheryl Acetate, DM DM Hydantoin, Menthyl Lactate, Silica Beads, Di-Sodium, EDTA",
+    "barcode": "8964002548019"
   }
 }

@@ -10,6 +10,9 @@ import threading
 from typing import Optional
 
 import aiohttp
+import requests
+from bs4 import BeautifulSoup
+from googlesearch import search
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import CommandStart
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
@@ -24,7 +27,7 @@ if not BOT_TOKEN:
 # Open Beauty Facts API
 OBF_SEARCH = "https://world.openbeautyfacts.org/api/v2/search"
 OBF_PRODUCT = "https://world.openbeautyfacts.org/api/v2/product/{barcode}.json"
-HEADERS = {"User-Agent": "CosmeticAnalogBot/1.0 (contact: your@email)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -36,10 +39,8 @@ try:
     with open('local_brands.json', 'r', encoding='utf-8') as f:
         LOCAL_DB = json.load(f)
     logging.info(f"Локальная база загружена. Брендов: {len(LOCAL_DB)}")
-except FileNotFoundError:
-    logging.warning("Файл local_brands.json не найден. Бот будет искать только в OBF.")
-except json.JSONDecodeError as e:
-    logging.error(f"Ошибка в формате local_brands.json: {e}")
+except Exception as e:
+    logging.warning(f"Не удалось загрузить local_brands.json: {e}")
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 app = Flask(__name__)
@@ -70,16 +71,19 @@ def normalize_inci(text: str) -> set[str]:
     return result
 
 
+def jaccard(a: set[str], b: set[str]) -> float:
+    """Сходство Жаккара: |A∩B| / |A∪B|."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
 # ---------- УМНОЕ СРАВНЕНИЕ ----------
 def smart_similarity(a_text: str, b_text: str) -> float:
-    """
-    Вычисляет взвешенное сходство двух составов.
-    Игнорирует воду/консерванты и учитывает порядок ингредиентов.
-    """
+    """Вычисляет взвешенное сходство двух составов (игнорирует воду и консерванты)."""
     if not a_text or not b_text:
         return 0.0
         
-    # Список того, что есть почти в любом средстве (не считаем за совпадение)
     IGNORE_LIST = {
         "aqua", "water", "eau", "glycerin", "glycerine", "parfum", "fragrance", 
         "phenoxyethanol", "methylparaben", "propylparaben", "ethylparaben", 
@@ -95,13 +99,9 @@ def smart_similarity(a_text: str, b_text: str) -> float:
         result = {}
         total_items = len(parts)
         for i, item in enumerate(parts):
-            # Убираем проценты и цифры
             word = re.sub(r"\s*\d+(\.\d+)?\s*%", "", item).strip()
             if len(word) < 3 or word in IGNORE_LIST:
                 continue
-                
-            # Вес: чем ближе к началу, тем выше (от 3.0 до 1.0)
-            # Первые 5 ингредиентов получают максимальный вес
             weight = max(1.0, 3.0 - (i / max(1, total_items)) * 2.0)
             result[word] = weight
         return result
@@ -112,21 +112,55 @@ def smart_similarity(a_text: str, b_text: str) -> float:
     if not dict_a or not dict_b:
         return 0.0
 
-    # Считаем сумму весов совпавших ингредиентов
     shared_weight = 0.0
     for word, weight in dict_a.items():
         if word in dict_b:
-            # Берем средний вес из двух составов
             shared_weight += (weight + dict_b[word]) / 2
 
-    # Максимально возможный вес (для нормализации)
     max_possible_weight = sum(dict_a.values()) + sum(dict_b.values())
     if max_possible_weight == 0:
         return 0.0
         
-    # Умножаем на 2, так как совпадение учитывается с двух сторон
     score = (shared_weight * 2) / max_possible_weight
-    return min(1.0, score) # Ограничиваем максимум 100%
+    return min(1.0, score)
+
+
+# ---------- ПОИСК В ИНТЕРНЕТЕ (Google + Парсинг) ----------
+def search_google_for_ingredients(product_name: str) -> Optional[str]:
+    """Ищет состав в интернете через Google и парсит первые сайты."""
+    query = f"{product_name} состав ингредиенты INCI"
+    logging.info(f"Поиск в Google: {query}")
+    
+    try:
+        # Ищем 5 ссылок
+        urls = list(search(query, num_results=5, lang="ru", sleep_interval=1))
+    except Exception as e:
+        logging.error(f"Google search failed: {e}")
+        return None
+
+    for url in urls:
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=10)
+            if response.status_code != 200:
+                continue
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            text = soup.get_text(separator=' ', strip=True)
+            
+            # Ищем блок с составом по ключевым словам
+            match = re.search(r'(?:Состав|Ingredients|INCI)[:\s]*([A-ZА-Я][^\n]{50,1500})', text, re.IGNORECASE)
+            if match:
+                ingredients = match.group(1).strip()
+                # Проверяем, что это действительно похоже на состав (много запятых)
+                if ingredients.count(',') > 3:
+                    logging.info(f"Найден состав на {url}")
+                    return ingredients
+                    
+        except Exception as e:
+            logging.warning(f"Ошибка парсинга {url}: {e}")
+            continue
+            
+    return None
 
 
 # ---------- OPEN BEAUTY FACTS ----------
@@ -165,21 +199,25 @@ async def obf_get_by_barcode(session: aiohttp.ClientSession, barcode: str) -> Op
 async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -> tuple[list[dict], Optional[dict]]:
     lower_name = product_name.lower() if product_name else ""
     source = None
+    source_inci_text = ""
     
-    # 1. Сначала ищем в локальной базе
-    if lower_name in LOCAL_DB:
-        local_data = LOCAL_DB[lower_name]
-        source = {
-            "product_name": local_data.get("name", "Без названия"),
-            "brands": local_data.get("brand", "—"),
-            "ingredients_text": local_data.get("ingredients", ""),
-            "code": "local_db"
-        }
-        logging.info(f"Продукт найден в локальной базе: {lower_name}")
+    # 1. Локальная база
+    if LOCAL_DB:
+        words = [w for w in lower_name.split() if len(w) > 2]
+        for key, local_data in LOCAL_DB.items():
+            if all(w in key for w in words):
+                source = {
+                    "product_name": local_data.get("name", "Без названия"),
+                    "brands": local_data.get("brand", "—"),
+                    "ingredients_text": local_data.get("ingredients", ""),
+                    "code": local_data.get("barcode", "local_db")
+                }
+                source_inci_text = source["ingredients_text"]
+                break
 
-    async with aiohttp.ClientSession() as session:
-        # 2. Если в локальной базе нет, ищем в OBF
-        if not source:
+    # 2. Open Beauty Facts (если нет в локальной)
+    if not source:
+        async with aiohttp.ClientSession() as session:
             if barcode:
                 source = await obf_get_by_barcode(session, barcode)
             
@@ -205,12 +243,30 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
                                 source = p
                                 break
 
-        if not source:
-            return [], None
+    # 3. Если нигде нет — ищем в интернете через Google
+    if not source:
+        logging.info(f"Продукт не найден в базах, ищу в Google: {product_name}")
+        found_ingredients = search_google_for_ingredients(product_name)
+        if found_ingredients:
+            source = {
+                "product_name": product_name,
+                "brands": "Найдено в интернете",
+                "ingredients_text": found_ingredients,
+                "code": "google_search"
+            }
+            source_inci_text = found_ingredients
 
+    if not source:
+        return [], None
+
+    if not source_inci_text:
         source_inci_text = source.get("ingredients_text", "")
         
-        # 3. Ищем аналоги для сравнения в OBF
+    if not source_inci_text or len(source_inci_text) < 20:
+        return [], source
+
+    # 4. Ищем аналоги (только в OBF, так как там есть база для сравнения)
+    async with aiohttp.ClientSession() as session:
         source_name = (source.get("product_name") or "").lower()
         category = "en:face-creams"
         if "foundation" in source_name or "тональный" in source_name: category = "en:foundations"
@@ -226,12 +282,9 @@ async def find_analogs(product_name: str, barcode: str = None, top_n: int = 5) -
             other_inci_text = p.get("ingredients_text", "")
             if not other_inci_text: continue
             
-            # Используем новую умную функцию
             score = smart_similarity(source_inci_text, other_inci_text)
             
-            # Показываем только если совпадение реально высокое (больше 30%)
             if score >= 0.30:
-                # Считаем примерное количество общих ингредиентов для отображения
                 shared_count = len(normalize_inci(source_inci_text) & normalize_inci(other_inci_text))
                 total_count = len(normalize_inci(source_inci_text))
                 
@@ -268,11 +321,11 @@ async def cmd_start(message: types.Message):
 
 @dp.message(F.text == "❓ Помощь")
 async def help_handler(message: types.Message):
-    await message.answer("Напиши мне название косметики или её штрихкод, и я поищу аналоги по составу.")
+    await message.answer("Напиши мне название косметики или её штрихкод, и я поищу аналоги по составу. Если не найду в базе, поищу в интернете.")
 
 @dp.message(F.text == "ℹ️ О боте")
 async def about_handler(message: types.Message):
-    await message.answer("Я бот, который ищет аналоги косметики по базе Open Beauty Facts и локальной базе.")
+    await message.answer("Я бот, который ищет аналоги косметики. Сначала проверяю базу Open Beauty Facts и локальную базу, а если не нахожу — ищу состав в Google.")
 
 @dp.callback_query(F.data == "example_cerave")
 async def example_handler(callback: types.CallbackQuery):
@@ -306,8 +359,8 @@ async def handle_product(message: types.Message):
 
     if not source:
         await message.answer(
-            "❌ Не удалось найти продукт в базе Open Beauty Facts и в локальной базе.\n\n"
-            "Попробуйте указать бренд + название или проверьте штрихкод."
+            "❌ Не удалось найти продукт ни в базе Open Beauty Facts, ни в интернете.\n\n"
+            "Попробуйте указать бренд + название более точно."
         )
         return
 
@@ -315,8 +368,8 @@ async def handle_product(message: types.Message):
     source_brand = source.get("brands") or "—"
     source_inci_text = source.get("ingredients_text") or "Состав не указан"
     
-    if len(source_inci_text) > 1000:
-        source_inci_text = source_inci_text[:1000] + "..."
+    if len(source_inci_text) > 800:
+        source_inci_text = source_inci_text[:800] + "..."
 
     response = f"🧴 <b>Найден продукт:</b>\n<b>{source_name}</b> ({source_brand})\n"
     response += f"📜 <b>Состав:</b>\n<i>{source_inci_text}</i>\n\n"
@@ -331,7 +384,7 @@ async def handle_product(message: types.Message):
                 f"   Совпадение: <b>{a['score']}%</b> ({a['shared']} из {a['total']})\n"
                 f"   Штрихкод: <code>{a['code']}</code>\n"
             )
-        response += "\n⚠️ Сравнение по взвешенному сходству (умный алгоритм). Это ориентир."
+        response += "\n⚠️ Сравнение по взвешенному сходству (умный алгоритм)."
 
     try:
         if len(response) > 4000:

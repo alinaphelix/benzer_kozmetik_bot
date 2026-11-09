@@ -1,3 +1,6 @@
 aiogram>=3.0
 aiohttp
 flask
+googlesearch-python
+beautifulsoup4
+requests
