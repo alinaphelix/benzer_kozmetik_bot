@@ -106,9 +106,9 @@ def smart_similarity(a_text: str, b_text: str) -> float:
     return min(1.0, score)
 
 
-# ---------- ПОИСК В ИНТЕРНЕТЕ (Google + DuckDuckGo) ----------
+# ---------- ПОИСК В ИНТЕРНЕТЕ (СТРОГАЯ ПРОВЕРКА) ----------
 def search_web_for_ingredients(product_name: str) -> Optional[str]:
-    """Ищет состав в интернете и проверяет, что это тот самый продукт."""
+    """Ищет состав и проверяет, что на странице есть ВСЕ слова из запроса."""
     words = [w.lower() for w in product_name.split() if len(w) > 2]
     
     # 1. Пробуем Google
@@ -119,7 +119,7 @@ def search_web_for_ingredients(product_name: str) -> Optional[str]:
         logging.warning(f"Google search failed: {e}")
         urls = []
 
-    # 2. Если Google не дал ссылок, пробуем DuckDuckGo (HTML версия)
+    # 2. Если Google не дал ссылок, пробуем DuckDuckGo
     if not urls:
         try:
             ddg_url = "https://html.duckduckgo.com/html/"
@@ -133,20 +133,17 @@ def search_web_for_ingredients(product_name: str) -> Optional[str]:
     for url in urls:
         try:
             if 'duckduckgo.com/l/?uddg=' in url:
-                # Очищаем ссылку DuckDuckGo
                 url = requests.utils.unquote(url.split('uddg=')[1].split('&')[0])
 
             response = requests.get(url, headers=HEADERS, timeout=10)
-            if response.status_code != 200:
-                continue
+            if response.status_code != 200: continue
             
             soup = BeautifulSoup(response.text, 'html.parser')
-            # Проверяем заголовок страницы (title)
-            page_title = soup.title.string.lower() if soup.title else ""
-            page_text = soup.get_text(separator=' ', strip=True)
+            page_text = soup.get_text(separator=' ', strip=True).lower()
             
-            # Проверяем, что на странице есть слова из нашего запроса
-            if not any(w in page_title or w in page_text[:500].lower() for w in words):
+            # СТРОГАЯ ПРОВЕРКА: на странице должны быть ВСЕ слова из названия
+            if not all(w in page_text for w in words):
+                logging.info(f"Пропускаем {url}: нет всех слов из запроса")
                 continue
 
             # Ищем блок с составом
